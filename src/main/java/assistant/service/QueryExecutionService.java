@@ -101,6 +101,11 @@ public class QueryExecutionService {
                 Object mcpResult = mcpActionDispatcher.dispatch(action, params);
                 log.info("MCP action result: {}", mcpResult);
 
+                if ("validate_user_request".equals(action) && mcpResult instanceof String && !"Valid".equals(mcpResult)) {
+                    finalResult = mcpResult.toString();
+                    break;
+                }
+
                 // Save turn in history
                 ConversationTurn turn = new ConversationTurn();
                 turn.setTurn(history.getHistory().size() + 1);
@@ -338,7 +343,16 @@ public class QueryExecutionService {
         if (userQuery == null || userQuery.trim().isEmpty()) {
             return "Invalid: UserQuery is empty.";
         }
-        // Add more advanced checks as needed (e.g., off-topic, chit-chat detection)
+        if (userQuery.trim().length() < 5) {
+            return "Invalid: Query too short.";
+        }
+        List<String> schemaKeywords = schemaService.getAllTableAndColumnNames();
+        String lowerQuery = userQuery.toLowerCase();
+        boolean relevant = schemaKeywords.stream()
+                .anyMatch(keyword -> lowerQuery.contains(keyword.toLowerCase()));
+        if (!relevant) {
+            return "Invalid: Query does not reference any known tables or columns.";
+        }
         return "Valid";
     }
 

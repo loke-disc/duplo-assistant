@@ -230,6 +230,19 @@ public class SchemaService {
         return schemaBuilder.toString();
     }
 
+    public List<String> getAllTableAndColumnNames() {
+        List<String> names = new ArrayList<>();
+        try {
+            for (TableInfo table : fetchTableInfos()) {
+                names.add(table.getTableName());
+                names.addAll(table.getColumns());
+            }
+        } catch (Exception e) {
+            log.error("Error fetching table/column names: {}", e.getMessage());
+        }
+        return names;
+    }
+
     public String getRelevantSchemaFromContext(String ragContext) {
         StringBuilder schemaBuilder = new StringBuilder();
         try {
