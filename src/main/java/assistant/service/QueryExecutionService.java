@@ -21,6 +21,8 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import org.springframework.stereotype.Service;
+
 
 @Slf4j
 @Service
@@ -133,7 +135,10 @@ public class QueryExecutionService {
                     finalResult = mcpResult.toString();
                     break;
                 }
-
+                if ("check_query".equals(action) && mcpResult instanceof String && mcpResult.toString().contains("Failed")) {
+                    finalResult = mcpResult.toString();
+                    break;
+                }
                 // Save turn in history
                 ConversationTurn turn = new ConversationTurn();
                 turn.setTurn(history.getHistory().size() + 1);
@@ -415,14 +420,36 @@ public class QueryExecutionService {
 
     // Validates the SQL for safety and correctness
     public String validateQuery(String sql) {
-        // Basic check for forbidden keywords, etc.
         if (sql == null || sql.trim().isEmpty()) {
             return "Query Check Failed: SQL is empty.";
         }
-        if (sql.toLowerCase().contains("drop") || sql.toLowerCase().contains("delete")) {
-            return "Query Check Failed: Dangerous SQL detected.";
+
+        String lowerSql = sql.toLowerCase().trim();
+
+        // ✅ 2. Blacklist dangerous SQL keywords
+        List<String> forbiddenKeywords = List.of(
+                "drop", "delete", "truncate", "alter", "update", "insert",
+                "merge", "call", "grant", "revoke", "execute", "create", "replace"
+        );
+        for (String keyword : forbiddenKeywords) {
+            if (lowerSql.matches(".*\\b" + keyword + "\\b.*")) {
+                return "Query Check Failed: Dangerous SQL keyword detected: " + keyword;
+            }
         }
-        // Add more validation as needed
+
+        // ✅ 3. Basic SQL injection prevention
+        if (lowerSql.contains("--") || lowerSql.contains("/*") || lowerSql.contains("*/")) {
+            return "Query Check Failed: SQL comments are not allowed.";
+        }
+        if (lowerSql.contains(" or ") && (lowerSql.contains("= ") || lowerSql.contains("=1") || lowerSql.contains("1=1"))) {
+            return "Query Check Failed: Potential SQL injection pattern (e.g., OR 1=1).";
+        }
+        String trimmed = lowerSql.trim();
+        int semicolonCount = trimmed.length() - trimmed.replace(";", "").length();
+        if (semicolonCount > 1 || (semicolonCount == 1 && !trimmed.endsWith(";"))) {
+            return "Query Check Failed: Multiple SQL statements (semicolon) are not allowed.";
+        }
+
         return "Query Check Passed. Can be executed.";
     }
 
