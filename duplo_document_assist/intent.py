@@ -12,7 +12,7 @@ intent_anchors = {
         "Show me the total sales in January.",
         "Fetch order details for order ID 456."
     ],
-    "answer": [
+    "document": [
         "What is a work order?",
         "How does the system work?",
         "Explain the user onboarding process.",
@@ -27,7 +27,7 @@ def cosine_similarity(a, b):
 def get_best_intent(user_prompt):
 
     if duplo_link in user_prompt:
-        return "check error"
+        return "check_error"
 
     user_embedding = model.encode(user_prompt)
     best_intent = None

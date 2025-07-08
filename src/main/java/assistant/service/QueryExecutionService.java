@@ -36,6 +36,7 @@ public class QueryExecutionService {
     private final RAGService ragService;
     private final McpActionDispatcher mcpActionDispatcher;
     private String intent;
+    private String workOrderId;
 
     @Value("${llm.model.name}")
     private String llmModelName;
@@ -79,16 +80,24 @@ public class QueryExecutionService {
         String previousContext = history.getHistory().stream()
                 .map(turn -> "User: " + turn.getUserQuery() + "\nAI: " + turn.getLlmFormattedResponse())
                 .collect(Collectors.joining("\n"));
-
+        log.info("Checking Intent");
         intent = checkIntent(userQuery);
-        if (Objects.equals(intent, "answer")){
+        log.info("Intent: {}", intent);
+
+        if (Objects.equals(intent, "document")){
            return getDocumentAssistAnswer(userQuery);
         }
 
-        String wo_id = "";
+        workOrderId = extractWorkOrderId(userQuery);
         if (Objects.equals(intent, "check_error")){
-            userQuery = String.format("what is the workorder_status of work_order_id = '%s'", wo_id);
+            previousContext = "";
+            userQuery = String.format("what is the job type description of work_order_id = '%s'", workOrderId);
         }
+
+
+        // mcp action for check error
+        // add instructions for orchestration logic to return check_error mcp action
+
         /** *
          * use the classification intent to determine the next steps
          * if "sql" use the existing orchestration logic
@@ -108,8 +117,7 @@ public class QueryExecutionService {
         String ragContext = String.join("\n", relevantRAGChunks);
         String databaseSchema = schemaService.getRelevantSchemaFromContext(ragContext);
 
-        String prompt = buildLlmPrompt(userQuery, databaseSchema, ragContext, previousContext, conversationId);
-//        log.info("Generated LLM prompt: {}", prompt);
+        String prompt = buildLlmPrompt(userQuery, databaseSchema, ragContext, previousContext, conversationId, intent);
         String llmResponse = chatModel.generate(prompt);
         log.info("LLM response: {}", llmResponse);
 
@@ -154,7 +162,7 @@ public class QueryExecutionService {
                 if (isTerminal && !hasError) {
                     finalResult = objectMapper.writeValueAsString(mcpResult);
                     if ("execute_query".equals(action)) {
-                        Map newParams = objectMapper.convertValue(node.get("params"), Map.class);
+                        Map<String, Object> newParams = objectMapper.convertValue(node.get("params"), Map.class);
                         String sql = (String) newParams.get("sql");
                         SqlHistory history1 = new SqlHistory();
                         history1.setQuery(userQuery);
@@ -169,7 +177,7 @@ public class QueryExecutionService {
                 }
 
                 llmResponse = chatModel.generate(
-                        buildFollowupPrompt(userQuery, databaseSchema, ragContext, previousContext, conversationId, action, mcpResult)
+                        buildFollowupPrompt(userQuery, databaseSchema, ragContext, previousContext, conversationId, action, mcpResult, intent)
                 );
                 log.info("Followup LLM response: {}", llmResponse);
             }
@@ -180,8 +188,8 @@ public class QueryExecutionService {
 
         return finalResult;
     }
-
-    private String buildLlmPrompt(String userQuery, String schema, String ragContext, String previousContext, String conversationId) {
+// update for check error action
+    private String buildLlmPrompt(String userQuery, String schema, String ragContext, String previousContext, String conversationId, String intent) {
         String conversationHistorySection = (previousContext != null && !previousContext.isEmpty())
                 ? String.format("CONVERSATION HISTORY:\n%s\n", previousContext)
                 : "";
@@ -214,13 +222,17 @@ public class QueryExecutionService {
                 User Query: %s
                 
                 conversationId: %s
+                
+                
+                
+                intent: %s
                 """,
-                schema, ragContext, conversationHistorySection, userQuery, conversationId
+                schema, ragContext, conversationHistorySection, userQuery, conversationId, intent
         );
     }
 
     private String buildFollowupPrompt(String userQuery, String schema, String ragContext, String previousContext,
-                                       String conversationId, String lastAction, Object lastResult) {
+                                       String conversationId, String lastAction, Object lastResult, String intent) {
         String conversationHistorySection = (previousContext != null && !previousContext.isEmpty())
                 ? String.format("CONVERSATION HISTORY:\n%s\n", previousContext)
                 : "";
@@ -236,6 +248,7 @@ public class QueryExecutionService {
                     You are an intelligent assistant for a PostgreSQL database with access to the following tools (MCP actions):
         
                     Available actions:
+                    - check_error: If intent is "check_error", return the check_error action with the user query.
                     - generate_sql: Generate a SQL statement for a valid user query.
                     - check_query: Check the generated SQL query for safety and correctness.
                     - execute_query: Execute a SQL query and return results.
@@ -246,15 +259,17 @@ public class QueryExecutionService {
                     Instructions:
                     1. If the last action was `check_query` and it passed, the ONLY valid next action is `execute_query` with the SAME SQL. Do NOT use `generate_sql` or any other action.
                     2. Do not use `validate_user_request` again after the first step.
-                    3. If the request is valid, use `generate_sql` to create the SQL.
-                    4. After `generate_sql` returns a SQL (starting with SELECT), always use `check_query` next.
-                    5. If `execute_query` fails, use `generate_sql` again with the failure reason.
-                    6. If the result set is too large, use `explain_query` and then `summarize_results`.
-                    7. Do not repeat any action unless the previous step failed.
-                    8. Always respond with a single JSON object for the next action.
-                    9. Do not return SQL directly or outside JSON.
-                    10. Always copy the entire DATABASE SCHEMA and RAG CONTEXT sections exactly as provided above into the corresponding fields.
-        
+                    3. If intent is "check_error" and last action was 'validate_user_request' and the request is valid, then return the check_error action with the user query.
+                    4. If intent is "sql" and last action was 'validate_user_request' and the request is valid, use generate_sql to create the SQL.
+                    5. After `generate_sql` returns a SQL (starting with SELECT), always use `check_query` next.
+                    6. If `execute_query` fails, use `generate_sql` again with the failure reason.
+                    7. If the result set is too large, use `explain_query` and then `summarize_results`.
+                    8. Do not repeat any action unless the previous step failed.
+                    9. Always respond with a single JSON object for the next action.
+                    10. Do not return SQL directly or outside JSON.
+                    11. Always copy the entire DATABASE SCHEMA and RAG CONTEXT sections exactly as provided above into the corresponding fields.
+                    
+                    
                     JSON examples for each action:
                     {
                       "action": "generate_sql",
@@ -291,6 +306,12 @@ public class QueryExecutionService {
                         "results": "<result set>"
                       }
                     }
+                    {
+                      "action": "check_error",
+                      "params": {
+                         "userQuery": "<user query>"
+                    }
+                    }
         
                     CONTEXT:
                     Last action: %s
@@ -307,9 +328,10 @@ public class QueryExecutionService {
         
                     conversationId: %s
         
+                    INTENT: %s
                     Based on the above, provide the next MCP action as a JSON object.
                     """,
-                forceExecuteQuery, lastAction, lastResult, schema, ragContext, conversationHistorySection, userQuery, conversationId
+                forceExecuteQuery, lastAction, lastResult, schema, ragContext, conversationHistorySection, userQuery, conversationId, intent
         );
     }
 
@@ -341,6 +363,38 @@ public class QueryExecutionService {
         return sb.toString();
     }
 
+// change this to followup
+// check if status is materials pending
+
+    private String checkErrorGenerateSqlLlmPrompt(String userQuery, String failureReason, String databaseSchema, String ragContext, String previousContext, String conversationId) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("You are an expert SQL generator for a PostgreSQL database.\n");
+        sb.append("Given the following context, generate a single, safe, executable SELECT SQL statement that answers the user's question.\n\n");
+        sb.append("DATABASE SCHEMA:\n").append(databaseSchema).append("\n\n");
+        if (ragContext != null && !ragContext.isEmpty()) {
+            sb.append("RAG CONTEXT:\n").append(ragContext).append("\n\n");
+        }
+        if (previousContext != null && !previousContext.isEmpty()) {
+            sb.append("CONVERSATION HISTORY:\n").append(previousContext).append("\n\n");
+        }
+        sb.append("User Query: ").append(userQuery).append("\n");
+        if (failureReason != null && !failureReason.isEmpty()) {
+            sb.append("Previous SQL execution failed. Error: ").append(failureReason).append("\n");
+            sb.append("Regenerate a correct SQL statement that avoids this error.\n");
+        }
+        sb.append("Rules:\n");
+        sb.append("1. Use only SELECT statements.\n");
+        sb.append("2. Use exact table and column names from the schema.\n");
+        sb.append("3. Do not include DDL or DML statements.\n");
+        sb.append("4. Add LIMIT 100 unless otherwise specified.\n");
+        sb.append("5. Output only the SQL, either as plain text, in a code block, or as a JSON field named 'sql'.\n");
+        sb.append("6. Do not include explanations or comments.\n");
+        sb.append("7. Do not ask for user confirmation.\n");
+        sb.append("conversationId: ").append(conversationId).append("\n");
+        return sb.toString();
+    }
+
+    // new build prompt method for check error action
     public String extractCodeBlockFromResponse(String llmResponse) {
         // 1. Try to extract from code block
         String[] codeBlocks = llmResponse.split("```");
@@ -473,6 +527,12 @@ public class QueryExecutionService {
         }
     }
 
+    public Object checkErrorPrompt(String userQuery, String failureReason, String databaseSchema, String ragContext, String previousContext, String conversationId) {
+        String prompt = buildGenerateSqlLlmPrompt(userQuery, failureReason, databaseSchema, ragContext, previousContext, conversationId);
+        String llmResponse = chatModel.generate(prompt);
+        return extractCodeBlockFromResponse(llmResponse);
+    }
+
     // Summarizes a large result set (simple example)
     public String summarizeResults(List<Map<String, Object>> results) {
         if (results == null || results.isEmpty()) {
@@ -527,4 +587,32 @@ public class QueryExecutionService {
             return "Error: " + e.getMessage();
         }
     }
+    public String extractWorkOrderId(String query) {
+        Pattern pattern = Pattern.compile(".*/order/([a-f0-9\\-]{36})(\\\\?.*)?");
+        Matcher matcher = pattern.matcher(query);
+
+        if (matcher.find()) {
+            return matcher.group(1);
+        } else {
+            return ("No Work Order ID found.");
+        }
+    }
+
+    public String getJobTypeForWorkOrder(String userQuery) {
+        String workOrderId = extractWorkOrderId(userQuery);
+        String sql = String.format(" SELECT description from job_type where job_type_id =(SELECT job_type_id FROM work_order WHERE work_order_id ='%s')", workOrderId);
+        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql);
+        return result.toString();
+    }
+
+    /// Check if the given order is of Job Type - Closed Captioning AI (or take example of only this job type workorder)
+    /// If a work_order has status - Materials Pending, then check if its because of Materials Available task have status as
+    ///either Video Pending or Proxy Pending.
+    /// Video Pending means cut is not present.
+    /// Proxy Pending means manifestation not present.
+    /// Format and send response to user with these details.
+    /// 2. If Caption Generation task is pending for a given work order, then get the timestamp of Push Materials task completion
+    ///from the audit table. Form the summary like the demand was sent to Caption team on the extracted date,
+    ///and will be Complete/Pending once Duplo receives response from Caption.
+
 }
