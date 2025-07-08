@@ -34,6 +34,7 @@ public class QueryExecutionService {
     private final RAGService ragService;
     private final McpActionDispatcher mcpActionDispatcher;
     private String intent;
+    private String workOrderId;
 
     @Value("${llm.model.name}")
     private String llmModelName;
@@ -77,16 +78,20 @@ public class QueryExecutionService {
         String previousContext = history.getHistory().stream()
                 .map(turn -> "User: " + turn.getUserQuery() + "\nAI: " + turn.getLlmFormattedResponse())
                 .collect(Collectors.joining("\n"));
-
+        log.info("Checking Intent");
         intent = checkIntent(userQuery);
+        log.info("Intent: {}", intent);
+
         if (Objects.equals(intent, "document")){
            return getDocumentAssistAnswer(userQuery);
         }
 
-        String wo_id = extractWorkOrderId(userQuery);
+        workOrderId = extractWorkOrderId(userQuery);
         if (Objects.equals(intent, "check_error")){
-            userQuery = String.format("what is the work_order_status of work_order_id = '%s'", wo_id);
+            previousContext = "";
+            userQuery = String.format("what is the job type description of work_order_id = '%s'", workOrderId);
         }
+
 
         // mcp action for check error
         // add instructions for orchestration logic to return check_error mcp action
@@ -249,15 +254,17 @@ public class QueryExecutionService {
                     Instructions:
                     1. If the last action was `check_query` and it passed, the ONLY valid next action is `execute_query` with the SAME SQL. Do NOT use `generate_sql` or any other action.
                     2. Do not use `validate_user_request` again after the first step.
-                    3. If the request is valid, use `generate_sql` to create the SQL.
-                    4. After `generate_sql` returns a SQL (starting with SELECT), always use `check_query` next.
-                    5. If `execute_query` fails, use `generate_sql` again with the failure reason.
-                    6. If the result set is too large, use `explain_query` and then `summarize_results`.
-                    7. Do not repeat any action unless the previous step failed.
-                    8. Always respond with a single JSON object for the next action.
-                    9. Do not return SQL directly or outside JSON.
-                    10. Always copy the entire DATABASE SCHEMA and RAG CONTEXT sections exactly as provided above into the corresponding fields.
-                    11. If intent is "check_error" and last action was 'validate_user_request', return the check_error action with the user query.
+                    3. If intent is "check_error" and last action was 'validate_user_request' and the request is valid, then return the check_error action with the user query.
+                    4. If intent is "sql" and last action was 'validate_user_request' and the request is valid, use generate_sql to create the SQL.
+                    5. After `generate_sql` returns a SQL (starting with SELECT), always use `check_query` next.
+                    6. If `execute_query` fails, use `generate_sql` again with the failure reason.
+                    7. If the result set is too large, use `explain_query` and then `summarize_results`.
+                    8. Do not repeat any action unless the previous step failed.
+                    9. Always respond with a single JSON object for the next action.
+                    10. Do not return SQL directly or outside JSON.
+                    11. Always copy the entire DATABASE SCHEMA and RAG CONTEXT sections exactly as provided above into the corresponding fields.
+                    
+                    
                     JSON examples for each action:
                     {
                       "action": "generate_sql",
@@ -564,5 +571,21 @@ public class QueryExecutionService {
         }
     }
 
+    public String getJobTypeForWorkOrder(String userQuery) {
+        String workOrderId = extractWorkOrderId(userQuery);
+        String sql = String.format(" SELECT description from job_type where job_type_id =(SELECT job_type_id FROM work_order WHERE work_order_id ='%s')", workOrderId);
+        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql);
+        return result.toString();
+    }
+
+    /// Check if the given order is of Job Type - Closed Captioning AI (or take example of only this job type workorder)
+    /// If a work_order has status - Materials Pending, then check if its because of Materials Available task have status as
+    ///either Video Pending or Proxy Pending.
+    /// Video Pending means cut is not present.
+    /// Proxy Pending means manifestation not present.
+    /// Format and send response to user with these details.
+    /// 2. If Caption Generation task is pending for a given work order, then get the timestamp of Push Materials task completion
+    ///from the audit table. Form the summary like the demand was sent to Caption team on the extracted date,
+    ///and will be Complete/Pending once Duplo receives response from Caption.
 
 }
